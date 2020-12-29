@@ -11,6 +11,7 @@ local debugging=false
 local nosecrets=false
 local cummulate=false
 local html
+local taxrate=0.0
 
 function connectWithCSRF(method, url, postContent, postContentType, headers)
   url=baseurl..url
@@ -58,7 +59,7 @@ WebBanking{version=Version, url=url,services    = {"EquatePlus","EquatePlus (cum
 
 
 function SupportsBank (protocol, bankCode)
-  return  protocol == ProtocolWebBanking and (bankCode == "EquatePlus"  or bankCode == "EquatePlus (cumulative)") 
+  return  protocol == ProtocolWebBanking and (bankCode == "EquatePlus"  or bankCode == "EquatePlus (cumulative)")
 end
 
 function lprint(text)
@@ -80,7 +81,7 @@ function tprint (tbl, indent)
       end
       if type(v) == 'table' and indent < 9 then tprint(v,indent+3) end
     end
-  end 
+  end
 end
 
 function InitializeSession2 (protocol, bankCode, step, credentials, interactive)
@@ -93,14 +94,14 @@ function InitializeSession2 (protocol, bankCode, step, credentials, interactive)
     CSRF_TOKEN=nil
     csrfpId=nil
     connection = Connection()
-    
+
     username=credentials[1]
     password=credentials[2]
-      
+
     if bankCode == "EquatePlus (cumulative)" then
       cummulate=true
     end
-    
+
     if string.sub(username,1,1) == '#' then
       print("Debugging, remove # char from username!")
       username=string.sub(username,2)
@@ -130,18 +131,18 @@ function InitializeSession2 (protocol, bankCode, step, credentials, interactive)
     html:xpath("//*[@id='eqUserId']"):attr("value", username)
     html:xpath("//*[@id='eqPwdId']"):attr("value", password)
     html:xpath("//*[@id='submitField']"):attr("value","Continue")
-    
+
     content, charset, mimeType, filename, headers = connectWithCSRF(html:xpath("//*[@id='loginForm']"):submit())
     html= HTML(content)
-    
+
     -- 2.FA cuiMessages
     if html:xpath("//*[@class='cuiMessageConfirmBorder']"):text() ~= "" then
-      print(html:xpath("//*[@class='cuiMessageConfirmBorder']"):text()) 
+      print(html:xpath("//*[@class='cuiMessageConfirmBorder']"):text())
       return {
         title='Two-factor authentication',
         challenge=html:xpath("//*[@class='cuiMessageConfirmBorder']"):text(),
         label='Code'
-      } 
+      }
     else
       -- base url
       baseurl=connection:getBaseURL():match('^(.*/)')
@@ -165,10 +166,10 @@ function InitializeSession2 (protocol, bankCode, step, credentials, interactive)
     else
       return "Wrong 2FA code!"
     end
-    
-  end    
-  
-  return LoginFailed  
+
+  end
+
+  return LoginFailed
 end
 
 function ListAccounts (knownAccounts)
@@ -202,22 +203,65 @@ function RefreshAccount (account, since)
     for k,v in pairs(summary["entries"]) do
       local details=JSON(connectWithCSRF("POST","services/planDetails/get","{\"$type\":\"EntityIdentifier\",\"id\":\""..v["id"].."\"}")):dictionary()
       if debugging then tprint (details) end
-      local status,err = pcall( function()
+      if details["planModuleId"] == "OWN" then
+        if debugging then tprint (details["totals"]) end
+        local ownsecurity={
+                        -- String name: Bezeichnung des Wertpapiers
+                        name=details["name"],
+
+                        -- String isin: ISIN
+                        -- String securityNumber: WKN
+                        -- String market: Börse
+                        isin="DE0007164600",
+                        market="XETRA",
+
+                        -- String currency: Währung bei Nominalbetrag oder nil bei Stückzahl
+                        -- Number quantity: Nominalbetrag oder Stückzahl
+                        quantity=details["totals"][1]["quantity"]["amount"],
+                        --quantity=1,
+
+                        -- Number amount: Wert der Depotposition in Kontowährung
+                        -- Number originalCurrencyAmount: Wert der Depotposition in Originalwährung
+                        -- Number exchangeRate: Wechselkurs
+
+                        -- Number tradeTimestamp: Notierungszeitpunkt; Die Angabe erfolgt in Form eines POSIX-Zeitstempels.
+                        tradeTimestamp=os.time(),
+
+                        -- Number price: Aktueller Preis oder Kurs
+                        price=details["totals"][1]["value"]["amount"]/details["totals"][1]["quantity"]["amount"],
+                        --price=100,
+
+                        -- String currencyOfPrice: Von der Kontowährung abweichende Währung des Preises.
+                        -- Number purchasePrice: Kaufpreis oder Kaufkurs
+                        -- purchasePrice=v["COST_BASIS"]["amount"],
+                        --purchasePrice=details["totals"][1]["value"]["amount"]/details["totals"][1]["quantity"]["amount"],
+                        --purchasePrice=10,
+
+                      -- String currencyOfPurchasePrice: Von der Kontowährung abweichende Währung des Kaufpreises.
+
+                      }
+        table.insert(securities,ownsecurity)
+      else
+       local status,err = pcall( function()
         for k,v in pairs(details["entries"]) do
           local status,err = pcall( function()
             for k,v in pairs(v["entries"]) do
               local status,err = pcall( function()
                 local marketName=v["marketName"]
-                local marketPrice=v["marketPrice"]["amount"]
+                if debugging then print (marketName) end
+                local marketPrice=0
+                if v["marketPrice"] then marketPrice=v["marketPrice"]["amount"] end
                 for k,v in pairs(v["entries"]) do
                   local status,err = pcall( function()
-                    if(v["COST_BASIS"])then
+                    if(v["ACTIONABLE_DATE"])then
                       -- "date": "2016-02-12T00:00:00.000",
                       local year,month,day=v["ALLOC_DATE"]["date"]:match ( "^(%d%d%d%d)%-(%d%d)%-(%d%d)")
                       --print (year.."-"..month.."-"..day)
                       if(year)then
                         tradeTimestamp=os.time({year=year,month=month,day=day})
                       end
+                      local year,month,day=v["ACTIONABLE_DATE"]["date"]:match ( "^(%d%d%d%d)%-(%d%d)%-(%d%d)")
+
                       local qty=0
                       if v["AVAIL_QTY"] and v["AVAIL_QTY"]["amount"] then
                         qty=v["AVAIL_QTY"]["amount"]
@@ -228,12 +272,13 @@ function RefreshAccount (account, since)
                       end
                       local security={
                         -- String name: Bezeichnung des Wertpapiers
-                        name=v["VEHICLE_DESCRIPTION"],
+                        name=year.."-"..month.."-"..day.." "..v["VEHICLE_DESCRIPTION"],
 
                         -- String isin: ISIN
                         -- String securityNumber: WKN
                         -- String market: Börse
                         market=marketName,
+                        isin="DE0007164600",
 
                         -- String currency: Währung bei Nominalbetrag oder nil bei Stückzahl
                         -- Number quantity: Nominalbetrag oder Stückzahl
@@ -247,11 +292,12 @@ function RefreshAccount (account, since)
                         tradeTimestamp=tradeTimestamp,
 
                         -- Number price: Aktueller Preis oder Kurs
-                        price=marketPrice,
+                        price=marketPrice*(1-taxrate),
 
                         -- String currencyOfPrice: Von der Kontowährung abweichende Währung des Preises.
                         -- Number purchasePrice: Kaufpreis oder Kaufkurs
-                        purchasePrice=v["COST_BASIS"]["amount"],
+                        -- purchasePrice=v["COST_BASIS"]["amount"],
+                        -- purchasePrice=marketPrice,
 
                       -- String currencyOfPurchasePrice: Von der Kontowährung abweichende Währung des Kaufpreises.
 
@@ -280,8 +326,9 @@ function RefreshAccount (account, since)
           end) --pcall
           bugReport(status,err,v)
         end
-      end) --pcall
-      bugReport(status,err,v)
+       end) --pcall
+       bugReport(status,err,v)
+      end
     end
   end) --pcall
   bugReport(status,err,v)
@@ -302,5 +349,4 @@ function EndSession ()
   connectWithCSRF("GET","services/participant/logout")
 end
 
-
-
+-- SIGNATURE: MCwCFGW6sACVzjXBLO6xxWeF5YGGBIOQAhRwqECujGGixFQD8TK97E8CuHuzQA==
